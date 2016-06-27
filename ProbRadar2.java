@@ -6,17 +6,20 @@ import java.util.Random;
 import lejos.geom.Point;
 import lejos.robotics.mapping.*;
 import lejos.robotics.navigation.Pose;
+import lejos.util.Delay;
 
 public class ProbRadar2 {
 	ArrayList<Point> possiblePoints;
 	float[][] probPoints;
 	int[][] expectedMeasures;
 	MasterRobot master;
+	Pose poseTest;
 	Map map;
 	int sizeAng = 5;
 	LineMap myMap;
 	float WIDTH, HEIGHT;
-	int M = 1000;
+	int M = 10000;
+	PrintMap pm;
 	final static boolean VERBOSE = false;
 	ReadMeasures rm;
 	
@@ -39,6 +42,7 @@ public class ProbRadar2 {
 		master = new MasterRobot();
 		//master.connect();
 		map = new Map();
+
 		try {
 			myMap = map.readMap("map");
 		} catch (NumberFormatException e) {
@@ -47,6 +51,7 @@ public class ProbRadar2 {
 		} catch (IOException e) {
 			e.printStackTrace();
 		}
+		pm = new PrintMap(myMap);
 		
 		possiblePoints = new ArrayList<Point>();
 		
@@ -56,16 +61,22 @@ public class ProbRadar2 {
 		possiblePoints.add(new Point(31, 156));
 		possiblePoints.add(new Point(102, 156));
 		
-		rm = new ReadMeasures("p2.txt");
+		rm = new ReadMeasures("p3.txt");
 		
 		WIDTH= myMap.getBoundingRect().width;
 		HEIGHT= myMap.getBoundingRect().height;
+		
+		
 	}
 	
 	public void doSomething() throws NumberFormatException, IOException
 	{
 		Particle[] particles = new Particle[M];
 		int angle = 5;
+		int count = 0;
+		int countDiversificate = 20;
+		
+		poseTest = new Pose(31, 156, 0);
 		
 		
 		if(VERBOSE) System.out.println("Doing something~~~~~~~ ");
@@ -78,35 +89,39 @@ public class ProbRadar2 {
 			Pose p;
 			Point point;
 			do{	
-			p = new Pose(WIDTH*rand.nextFloat(), HEIGHT*rand.nextFloat(), rand.nextInt(360));
-			point = new Point((int)p.getX(), (int)p.getY());
-			}while(!myMap.inside(point));
+				p = new Pose(WIDTH*rand.nextFloat(), HEIGHT*rand.nextFloat(), rand.nextInt(360));
+				point = new Point((int)p.getX(), (int)p.getY());
+			} while(!myMap.inside(point));
+			pm.addPose(p);
 			particles[i] = new Particle(p);
 		}
 		
 		
 		for(int k = 0; k < 360/angle; k++)
 		{
+			count++;
+			pm.clear();
+			pm.addRef(poseTest);
 			//Percepção
-			float range = getReading();
-			float soma = 0.0f;
-			for (int i = 0; i < M; i++) {
-				particles[i].weight = sonarProbability(range, particles[i].pose);
-				soma += particles[i].weight;
-			}
-			Particle[] oldParticles = particles;
-			particles = new Particle[M];
-			for (int i = 0; i < M; i++) {			
-				float u = rand.nextFloat();
-				float prob = 0.0f;
-				for (int j = 0; j < M; j++) {
-					if (prob > u) break; 
-					else prob += oldParticles[j].weight/soma;
-					particles[i] = new Particle(oldParticles[j].pose);
-				}
+			//float range = getReading(); // !!!!!!!!!!!!!!!
+			
+			//DEBUG
+			float range = this.shouldReturnThisAt(poseTest);
+					//myMap.range(poseTest);
+			
+			particles = particleFilter(range, angle, particles);
+			
+			for(int i = 0; i < M; i++){
+				pm.addPose(particles[i].pose);
+				
 			}
 			
-			
+			//Diversificação
+			Delay.msDelay(100);
+			if(count == countDiversificate){
+				particles = diversificate(particles);
+				count = 0;
+			}
 			
 			/*
 			//Localização
@@ -120,18 +135,47 @@ public class ProbRadar2 {
 			pose.setHeading(pose.getHeading()/M);
 			*/		
 			
-			//Predição
-			
-			move(angle);
-			for (int i = 0; i < M; i++) {
-				particles[i].applyMove(angle);
-			}
+			//Predição	
 		}
-		
-		
 		printMaxPoint(particles);
 		
 			
+	}
+	
+	private Particle[] particleFilter(float range, float angle, Particle[] particles)
+	{	
+		Random rand = new Random();
+				
+		//Move 
+		move((int)angle);
+		for (int i = 0; i < M; i++) {
+			particles[i].applyMove((float)angle);
+		}
+		
+		
+		// DEBUG: Print reference heading
+		poseTest.setHeading(poseTest.getHeading() + angle);
+		System.out.println("Heading REF:"+ poseTest.getHeading());
+		
+		//Particle stuff		
+		Particle[] newParticles = new Particle[M];
+		float soma = 0.0f;
+		for (int i = 0; i < M; i++) {
+			particles[i].weight = sonarProbability(range, particles[i].pose);
+			soma += particles[i].weight;
+		}
+		for (int i = 0; i < M; i++) {			
+			float u = rand.nextFloat();
+			float prob = 0.0f;
+			int j;
+			for (j = 0; j < M; j++) {
+				prob += particles[j].weight/soma;
+				if (prob >= u) break; 
+			}
+			if(j == M) j = M -1;
+			newParticles[i] = new Particle(particles[j].pose);
+		}
+		return newParticles;
 	}
 	
 	private Particle[] diversificate(Particle[] particlesExt)
@@ -146,19 +190,21 @@ public class ProbRadar2 {
 			int j = rand.nextInt(M);
 			particles[i] = new Particle(oldParticles[j].pose);
 		}
+		
 		//gerar M/N partículas uniformemente distribuídas
-		for (int i = M/N; i < M; i++) {
+		for (int i = M - M/N; i < M	; i++) {
 			Pose p;
 			Point point;
 			do{	
 				p = new Pose(WIDTH*rand.nextFloat(), HEIGHT*rand.nextFloat(), rand.nextInt(360));
+				//p = new Pose(poseTest.getX() + WIDTH*rand.nextFloat() - WIDTH/2,
+					//	poseTest.getY() + HEIGHT*rand.nextFloat() - HEIGHT/2, rand.nextInt(360));
 				point = new Point((int)p.getX(), (int)p.getY());
 			}while(!myMap.inside(point));
 			particles[i] = new Particle(p);
 		}
 		
-		return particles;
-		
+		return particles;	
 	}
 	
 	
@@ -170,7 +216,7 @@ public class ProbRadar2 {
 	private int getReading()
 	{
 		//return master.range();
-		return rm.getNext();	
+		return rm.getNext();
 	}
 	
 	private float sonarProbability(float range, Pose pose) {
@@ -187,16 +233,15 @@ public class ProbRadar2 {
 		return probMeasureSonar((int)range,(int) expec );
 	}
 	
-	
-	private float shouldReturnThisAt(Pose tmppose) throws NumberFormatException, IOException
+	private float shouldReturnThisAt(Pose pose) throws NumberFormatException, IOException
 	{
 		
+		Pose tmppose = new Pose(pose.getX(), pose.getY(), pose.getHeading());
 		float theta = tmppose.getHeading();
 		theta = theta < 0 ? 360 + theta : theta;
 		//Pose mypose = new Pose(x, y, theta);
 		int cone = 30;
-		
-		
+				
 		float mindist = Float.POSITIVE_INFINITY; 
 		for (int angulo =- cone/2; angulo <= cone/2; angulo++) { 
 		tmppose.setHeading(	theta - angulo); 
@@ -272,8 +317,4 @@ public class ProbRadar2 {
 		
 		
 	}
-	
-	
-	
-
 }
